@@ -67,9 +67,42 @@ pub enum DeviceBootromCommand {
 }
 
 #[derive(Debug, StructOpt)]
+pub struct DeviceElgatoResetCommand {
+    #[structopt(name = "device", short, long)]
+    device_index: u32
+}
+
+#[derive(Debug, StructOpt)]
+pub struct DeviceElgatoReadFlashCommand {
+    #[structopt(short, long, parse(from_os_str))]
+    output: PathBuf,
+
+    #[structopt(name = "device", short, long)]
+    device_index: u32,
+
+    #[structopt(short, long)]
+    sector: usize,
+
+    #[structopt(short, long)]
+    count: usize,
+}
+
+#[derive(Debug, StructOpt)]
+pub enum DeviceElgatoCommand {
+    #[structopt(name = "read-flash")]
+    ReadFlash(DeviceElgatoReadFlashCommand),
+    #[structopt(name = "reset")]
+    Reset(DeviceElgatoResetCommand),
+}
+
+
+
+#[derive(Debug, StructOpt)]
 pub enum DeviceCommand {
     #[structopt(name = "bootrom")]
     Bootrom(DeviceBootromCommand),
+    #[structopt(name = "elgato")]
+    Elgato(DeviceElgatoCommand),
     #[structopt(name = "list")]
     List(DeviceListCommand),
 }
@@ -228,12 +261,49 @@ fn handle_device_bootrom_command(options: DeviceBootromCommand, devices: Vec<Dev
     };
 }
 
+fn handle_device_elgato_read_flash_command(options: DeviceElgatoReadFlashCommand, devices: Vec<DeviceInformation>) {
+    let device_info = devices.get(options.device_index as usize).unwrap();
+    let device = Device::open(device_info.vendor_id, device_info.product_id).unwrap();
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(options.output)
+        .unwrap();
+
+    device.set_elgato_firmware_flash_mode(true).unwrap();
+
+    for sector_index in options.sector..options.sector + options.count {
+        println!("Reading SPI sector {}...", sector_index);
+
+        for page_index in 0..=0xFF {
+            file.write_all(&device.read_elgato_spi_page(sector_index as u16, page_index).unwrap()).unwrap();
+        }
+    }
+
+    device.set_elgato_firmware_flash_mode(false).unwrap();
+}
+
+fn handle_device_elgato_command(options: DeviceElgatoCommand, devices: Vec<DeviceInformation>) {
+    match options {
+        DeviceElgatoCommand::Reset(options) => {
+            let device_info = devices.get(options.device_index as usize).unwrap();
+            let device = Device::open(device_info.vendor_id, device_info.product_id).unwrap();
+
+            device.reset_elgato_device().unwrap();
+        },
+        DeviceElgatoCommand::ReadFlash(options) => handle_device_elgato_read_flash_command(options, devices)
+    };
+}
+
 fn handle_device_command(options: DeviceCommand) {
     let devices = DeviceManager::devices();
 
     match options {
         DeviceCommand::List(_) => list_devices(devices),
-        DeviceCommand::Bootrom(options) => handle_device_bootrom_command(options, devices)
+        DeviceCommand::Bootrom(options) => handle_device_bootrom_command(options, devices),
+        DeviceCommand::Elgato(options) => handle_device_elgato_command(options, devices)
     };
 }
 

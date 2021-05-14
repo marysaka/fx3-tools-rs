@@ -5,13 +5,22 @@ use std::time::Duration;
 use std::io::Cursor;
 use std::io::Write;
 
+use std::convert::TryInto;
+
 const ELGATO_VID: u16 = 0xfd9;
 const CYPRESS_VID: u16 = 0x04b4;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 const OUTPUT_REQUEST_TYPE: u8 = 0x40;
+const OUTPUT_HID_REQUEST_TYPE: u8 = 0x21;
 const INPUT_REQUEST_TYPE: u8 = 0xC0;
+const INPUT_HID_REQUEST_TYPE: u8 = 0xA1;
+
+const HID_GET_REPORT: u8 = 0x1;
+const HID_SET_REPORT: u8 = 0x9;
+
+const ELGATO_RUNTIME_COMMAND_ID: u8 = 0x55;
 
 const FX3_BOOTROM_RAM_READ: u8 = 0xA0;
 const FX3_BOOTROM_RAM_WRITE: u8 = 0xA0;
@@ -85,10 +94,89 @@ impl<T: UsbContext> Device<T> {
         self.vendor_id == ELGATO_VID
     }
 
+    fn hid_report(&self, data0: u8, data1: u8, data2: u8, data3: u8) -> Result<Vec<u8>> {
+        let input = [data0, data1, data2, data3];
+
+        self.hid_report_write(&input)?;
+
+        let mut result = Vec::new();
+
+        result.resize(0x28, 0);
+
+        result[0] = 10;
+
+        self.hid_report_read(&mut result)?;
+
+        Ok(result)
+    }
+
+    fn hid_report_read(&self, data: &mut [u8]) -> Result<usize> {
+        self.handle.read_control(INPUT_HID_REQUEST_TYPE, HID_GET_REPORT, 1 << 8 | u16::from(data[0]), 2, data, DEFAULT_TIMEOUT)
+    }
+
+    fn hid_report_feature_read(&self, data: &mut [u8]) -> Result<usize> {
+        self.handle.read_control(INPUT_HID_REQUEST_TYPE, HID_GET_REPORT, 3 << 8 | u16::from(data[0]), 2, data, DEFAULT_TIMEOUT)
+    }
+
+    fn hid_report_write(&self, data: &[u8]) -> Result<usize> {
+        self.handle.write_control(OUTPUT_HID_REQUEST_TYPE, HID_SET_REPORT, 2 << 8 | u16::from(data[0]), 2, data, DEFAULT_TIMEOUT)
+    }
+
+    fn hid_report_feature_write(&self, data: &[u8]) -> Result<usize> {
+        self.handle.write_control(OUTPUT_HID_REQUEST_TYPE, HID_SET_REPORT, 3 << 8 | u16::from(data[0]), 2, data, DEFAULT_TIMEOUT)
+    }
+
+    pub fn read_elgato_firmware_version(&self) -> Result<String> {
+        assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
+
+        let data = self.hid_report(9, ELGATO_RUNTIME_COMMAND_ID, 2, 4)?;
+
+        Ok(format!("mcu: {:02}.{:02}.{:02}, fpga: {:02}", data[0], data[1], data[2], data[3]))
+    }
+
+    pub fn reset_elgato_device(&self) -> Result<()> {
+        assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
+
+        self.hid_report_write(&[0x12, 0x00])?;
+
+        Ok(())
+    }
+
+    pub fn set_elgato_firmware_flash_mode(&self, flash_mode: bool) -> Result<()> {
+        assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
+
+        let flash_mode_marker = if flash_mode { 1 } else { 0 };
+
+        self.hid_report_feature_write(&[0x1, flash_mode_marker])?;
+
+        Ok(())
+    }
+
+    pub fn read_elgato_spi_page(&self, sector: u16, page: u16) -> Result<Vec<u8>> {
+        assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
+
+        let mut result = Vec::new();
+        result.resize(0x102, 0);
+
+        let mut data = [2, 0, 0, 0, 0];
+        data[1..3].copy_from_slice(&u16::to_le_bytes(sector));
+        data[3..5].copy_from_slice(&u16::to_le_bytes(page));
+
+        self.hid_report_write(&data)?;
+
+        result[0] = 3;
+        result[1] = 0;
+        self.hid_report_read(&mut result)?;
+
+        // Remove input
+        result.remove(1);
+        result.remove(0);
+
+        Ok(result)
+    }
+
     pub fn read_ram(&self, address: u32, size: usize) -> Result<Vec<u8>> {
-        if !self.is_fx3_bootrom() {
-            panic!("This operation is only availaible on the FX3 bootrom!");
-        }
+        assert!(self.is_fx3_bootrom(), "This operation is only availaible on the FX3 bootrom!");
 
         let mut read_position = 0;
         let mut cursor = Cursor::new(Vec::new());
@@ -123,9 +211,7 @@ impl<T: UsbContext> Device<T> {
     }
 
     pub fn write_ram(&self, address: u32, data: &[u8]) -> Result<usize> {
-        if !self.is_fx3_bootrom() {
-            panic!("This operation is only availaible on the FX3 bootrom!");
-        }
+        assert!(self.is_fx3_bootrom(), "This operation is only availaible on the FX3 bootrom!");
 
         let mut write_position = 0;
 
@@ -208,7 +294,7 @@ impl DeviceManager {
             let product_id = device_desc.product_id();
             if vendor_id == CYPRESS_VID || vendor_id == ELGATO_VID {
                 if let Some(device) = Device::open(vendor_id, product_id) {
-                    let firmware_name: String;
+                    let mut firmware_name: String;
                     let firmware_name_result = device.read_firmware_name();
 
                     if let Ok(name) = firmware_name_result {
@@ -223,7 +309,9 @@ impl DeviceManager {
 
                         // Try to retrieve version informations.
                         if device.is_elgato_device() {
-
+                            if let Ok(firmware_version) = device.read_elgato_firmware_version() {
+                                firmware_name = format!("{} ({})", firmware_name, firmware_version);
+                            }
                         }
                     }
 
