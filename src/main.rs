@@ -88,14 +88,29 @@ pub struct DeviceElgatoReadFlashCommand {
 }
 
 #[derive(Debug, StructOpt)]
+pub struct DeviceElgatoWriteFlashCommand {
+    #[structopt(short, long, parse(from_os_str))]
+    input: PathBuf,
+
+    #[structopt(name = "device", short, long)]
+    device_index: u32,
+
+    #[structopt(short, long)]
+    sector: usize,
+
+    #[structopt(short, long)]
+    page: usize,
+}
+
+#[derive(Debug, StructOpt)]
 pub enum DeviceElgatoCommand {
     #[structopt(name = "read-flash")]
     ReadFlash(DeviceElgatoReadFlashCommand),
+    #[structopt(name = "write-flash")]
+    WriteFlash(DeviceElgatoWriteFlashCommand),
     #[structopt(name = "reset")]
     Reset(DeviceElgatoResetCommand),
 }
-
-
 
 #[derive(Debug, StructOpt)]
 pub enum DeviceCommand {
@@ -278,11 +293,51 @@ fn handle_device_elgato_read_flash_command(options: DeviceElgatoReadFlashCommand
         println!("Reading SPI sector {}...", sector_index);
 
         for page_index in 0..=0xFF {
-            file.write_all(&device.read_elgato_spi_page(sector_index as u16, page_index).unwrap()).unwrap();
+            file.write_all(&device.read_elgato_spi_page(sector_index as u8, page_index).unwrap()).unwrap();
         }
     }
 
     device.set_elgato_firmware_flash_mode(false).unwrap();
+}
+
+fn handle_device_elgato_write_flash_command(options: DeviceElgatoWriteFlashCommand, devices: Vec<DeviceInformation>) {
+    let device_info = devices.get(options.device_index as usize).unwrap();
+    let device = Device::open(device_info.vendor_id, device_info.product_id).unwrap();
+
+    let mut file = OpenOptions::new().read(true).open(options.input).unwrap();
+
+    let mut data: Vec<u8> = Vec::new();
+
+    file.read_to_end(&mut data).unwrap();
+
+    device.set_elgato_firmware_flash_mode(true).unwrap();
+
+    let mut size_to_write = data.len();
+    let mut current_sector = options.sector;
+    let mut current_page = options.page;
+
+    device.erase_elgato_spi_sector(current_sector as u8).unwrap();
+
+    while size_to_write > 0 {
+        let writable_count = usize::min(size_to_write, 0x100);
+
+        let position = (current_sector * 0x100 + current_page) * 0x100;
+
+        device.write_elgato_spi_page(current_sector as u8, current_page as u8, &data[position .. position + writable_count]).unwrap();
+
+        current_page += 1;
+
+        if current_page == 0x100 {
+            current_page = 0;
+            current_sector += 1;
+            device.erase_elgato_spi_sector(current_sector as u8).unwrap();
+        }
+
+        size_to_write -= writable_count;
+    }
+
+    device.set_elgato_firmware_flash_mode(false).unwrap();
+    //device.reset_elgato_device().unwrap();
 }
 
 fn handle_device_elgato_command(options: DeviceElgatoCommand, devices: Vec<DeviceInformation>) {
@@ -293,7 +348,8 @@ fn handle_device_elgato_command(options: DeviceElgatoCommand, devices: Vec<Devic
 
             device.reset_elgato_device().unwrap();
         },
-        DeviceElgatoCommand::ReadFlash(options) => handle_device_elgato_read_flash_command(options, devices)
+        DeviceElgatoCommand::ReadFlash(options) => handle_device_elgato_read_flash_command(options, devices),
+        DeviceElgatoCommand::WriteFlash(options) => handle_device_elgato_write_flash_command(options, devices)
     };
 }
 

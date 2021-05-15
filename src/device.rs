@@ -152,27 +152,48 @@ impl<T: UsbContext> Device<T> {
         Ok(())
     }
 
-    pub fn read_elgato_spi_page(&self, sector: u16, page: u16) -> Result<Vec<u8>> {
+    pub fn erase_elgato_spi_sector(&self, sector: u8) -> Result<()> {
+        assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
+
+        self.hid_report_write(&[5, sector])?;
+
+        Ok(())
+    }
+
+    pub fn read_elgato_spi_page(&self, sector: u8, page: u8) -> Result<Vec<u8>> {
         assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
 
         let mut result = Vec::new();
         result.resize(0x102, 0);
 
-        let mut data = [2, 0, 0, 0, 0];
-        data[1..3].copy_from_slice(&u16::to_le_bytes(sector));
-        data[3..5].copy_from_slice(&u16::to_le_bytes(page));
-
-        self.hid_report_write(&data)?;
+        self.hid_report_write(&[2, sector, page, 1, 0])?;
 
         result[0] = 3;
-        result[1] = 0;
         self.hid_report_read(&mut result)?;
 
-        // Remove input
-        result.remove(1);
-        result.remove(0);
+        let actual_size = u16::from_le_bytes(result[0x100..].try_into().unwrap());
+
+        result.resize(actual_size as usize, 0);
 
         Ok(result)
+    }
+
+    pub fn write_elgato_spi_page(&self, sector: u8, page: u8, data: &[u8]) -> Result<()> {
+        assert!(self.is_elgato_device(), "This operation is only availaible on the Elgato firmware!");
+
+        let mut request = [0x0; 0x105];
+
+        request[0] = 4;
+        request[1] = sector;
+        request[2] = page;
+        request[3] = 1;
+        request[4] = 0;
+
+        request[5..5 + data.len()].copy_from_slice(&data);
+
+        self.hid_report_write(&mut request)?;
+
+        Ok(())
     }
 
     pub fn read_ram(&self, address: u32, size: usize) -> Result<Vec<u8>> {
